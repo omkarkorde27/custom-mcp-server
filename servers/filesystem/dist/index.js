@@ -128,6 +128,12 @@ const ExecuteFileArgsSchema = z.object({
     workingDirectory: z.string().optional(),
     timeout: z.number().optional().default(30000) // 30 seconds default timeout
 });
+const ExecutePackageManagerArgsSchema = z.object({
+    command: z.enum(['npm', 'pip', 'pip3']),
+    args: z.array(z.string()),
+    workingDirectory: z.string().optional(),
+    timeout: z.number().optional().default(60000) // 60 seconds default timeout for package operations
+});
 const ToolInputSchema = ToolSchema.shape.inputSchema;
 // Server setup
 const server = new Server({
@@ -336,6 +342,78 @@ async function executeFile(filePath, args = [], interpreter = 'auto', workingDir
         });
     });
 }
+// Execute package manager utility
+async function executePackageManager(command, args = [], workingDirectory, timeout = 60000) {
+    // Validate working directory if provided
+    let cwd = process.cwd();
+    if (workingDirectory) {
+        cwd = await validatePath(workingDirectory);
+        const stats = await fs.stat(cwd);
+        if (!stats.isDirectory()) {
+            throw new Error('Working directory must be a directory');
+        }
+    }
+    // Allow only safe npm and pip commands
+    const allowedNpmCommands = ['install', 'uninstall', 'list', 'ls', 'outdated', 'view', 'search', 'update', 'audit', 'init', 'run', 'test', 'start', 'build'];
+    const allowedPipCommands = ['install', 'uninstall', 'list', 'show', 'search', 'freeze', 'check'];
+    if (args.length === 0) {
+        throw new Error('No command arguments provided');
+    }
+    const subCommand = args[0];
+    if (command === 'npm' && !allowedNpmCommands.includes(subCommand)) {
+        throw new Error(`npm command '${subCommand}' is not allowed. Allowed commands: ${allowedNpmCommands.join(', ')}`);
+    }
+    if ((command === 'pip' || command === 'pip3') && !allowedPipCommands.includes(subCommand)) {
+        throw new Error(`pip command '${subCommand}' is not allowed. Allowed commands: ${allowedPipCommands.join(', ')}`);
+    }
+    return new Promise((resolve, reject) => {
+        let stdout = '';
+        let stderr = '';
+        let processKilled = false;
+        const child = spawn(command, args, {
+            cwd,
+            shell: false,
+            env: { ...process.env, NODE_ENV: 'production' }
+        });
+        // Set up timeout
+        const timeoutId = setTimeout(() => {
+            processKilled = true;
+            child.kill('SIGTERM');
+            setTimeout(() => {
+                if (!child.killed) {
+                    child.kill('SIGKILL');
+                }
+            }, 1000);
+        }, timeout);
+        // Handle stdout
+        child.stdout.on('data', (data) => {
+            stdout += data.toString();
+        });
+        // Handle stderr
+        child.stderr.on('data', (data) => {
+            stderr += data.toString();
+        });
+        // Handle completion
+        child.on('close', (code) => {
+            clearTimeout(timeoutId);
+            if (processKilled) {
+                reject(new Error(`Process timed out after ${timeout}ms`));
+            }
+            else {
+                resolve({
+                    stdout,
+                    stderr,
+                    exitCode: code
+                });
+            }
+        });
+        // Handle errors
+        child.on('error', (error) => {
+            clearTimeout(timeoutId);
+            reject(error);
+        });
+    });
+}
 // Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
@@ -438,6 +516,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     "and provides the exit code. Supports passing command line arguments and setting a custom working directory. " +
                     "Files must be within allowed directories. Includes timeout protection (default 30 seconds).",
                 inputSchema: zodToJsonSchema(ExecuteFileArgsSchema),
+            },
+            {
+                name: "execute_package_manager",
+                description: "Execute npm or pip package manager commands safely. " +
+                    "Supports common package operations like install, uninstall, list, etc. " +
+                    "Captures both stdout and stderr streams and provides the exit code. " +
+                    "Allows setting a custom working directory for the operation. " +
+                    "Package installations are performed in the specified directory. " +
+                    "Includes timeout protection (default 60 seconds).",
+                inputSchema: zodToJsonSchema(ExecutePackageManagerArgsSchema),
             },
         ],
     };
@@ -609,6 +697,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     throw new Error(`Invalid arguments for execute_file: ${parsed.error}`);
                 }
                 const result = await executeFile(parsed.data.file, parsed.data.args, parsed.data.interpreter, parsed.data.workingDirectory, parsed.data.timeout);
+                let output = '';
+                if (result.stdout) {
+                    output += 'STDOUT:\n' + result.stdout;
+                }
+                if (result.stderr) {
+                    output += (output ? '\n\n' : '') + 'STDERR:\n' + result.stderr;
+                }
+                output += `\n\nExit code: ${result.exitCode}`;
+                return {
+                    content: [{ type: "text", text: output }],
+                };
+            }
+            case "execute_package_manager": {
+                const parsed = ExecutePackageManagerArgsSchema.safeParse(args);
+                if (!parsed.success) {
+                    throw new Error(`Invalid arguments for execute_package_manager: ${parsed.error}`);
+                }
+                const result = await executePackageManager(parsed.data.command, parsed.data.args, parsed.data.workingDirectory, parsed.data.timeout);
                 let output = '';
                 if (result.stdout) {
                     output += 'STDOUT:\n' + result.stdout;
