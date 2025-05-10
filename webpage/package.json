@@ -1,0 +1,21 @@
+{
+  "name": "ai-terminal-landing",
+  "version": "1.0.0",
+  "description": "Modern AI startup landing page with retro terminal theme",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "ai",
+    "startup",
+    "terminal",
+    "landing-page"
+  ],
+  "author": "AITerminal",
+  "license": "MIT",
+  "engines": {
+    "node": ">=12.0.0"
+  }
+}
